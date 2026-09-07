@@ -76,6 +76,7 @@ python3 airlock.py serve
 8. [Codes](#codes)
 9. [How it works](#how-it-works) · [HTTP API](#http-api)
 10. [Security notes](#security-notes)
+11. [Contributing](#contributing)
 
 ---
 
@@ -621,6 +622,59 @@ reaches the internet, and the isolated machine stays isolated: it only ever talk
 other box on the local link. `--enable-proxy` is the one thing that changes this, and it
 changes it deliberately. Do not arm it out of habit, and do not leave it armed on a server
 you start automatically. `airlock bridge status` will always tell you where you stand.
+
+---
+
+## Contributing
+
+**Contributions are very welcome**, especially cool features. This started as a weekend
+tool for one problem and it turns out a lot of people have that problem.
+
+### Three rules, and they are not negotiable
+
+Everything else is open. These three exist because of where this runs:
+
+1. **One file, standard library only.** No `pip install`, no `package.json`, no build
+   step. The machine this is for cannot download a dependency, ever. If a feature needs a
+   library, it needs to be written by hand or it does not go in.
+2. **Nothing is fetched at runtime.** No CDN, no web font, no remote API. The syntax
+   highlighter is ~150 lines of hand-written JavaScript for exactly this reason.
+3. **macOS and Linux, python3 3.8+.** Test on both. `docker run --rm -v "$PWD:/src:ro"
+   ubuntu:22.04` is enough for the Linux half.
+
+### Ideas worth stealing
+
+Roughly in order of how much they would improve daily use:
+
+- **Zeroconf discovery** - mDNS so the other machine finds the server instead of you
+  typing an IP. Doable with raw sockets, no dependency.
+- **A QR code of the join URL**, drawn in the page. Removes the last bit of retyping.
+  Needs a small hand-rolled QR encoder, which is the fun part.
+- **TLS with a self-signed cert**, so the code is not readable on the wire without
+  needing the SSH tunnel. `ssl` is in the standard library.
+- **Resumable uploads** for the multi-gigabyte dataset that dies at 90%.
+- **Two-way folder sync** - `watch` already pulls; a `--push` half would make it a real
+  sync.
+- **Image and PDF previews** in the item cards, from the bytes already on disk.
+- **A diff view** between any two text items in the lock.
+- **SOCKS mode for the bridge**, so tools that speak SOCKS but not HTTP proxy work too.
+
+### Before you open a PR
+
+There is no test suite yet - **adding one is itself a welcome contribution.** For now,
+exercise the thing you touched:
+
+```bash
+python3 airlock.py serve --port 9999 --dir /tmp/t --token test &
+python3 airlock.py link 127.0.0.1:9999 test
+echo hi | python3 airlock.py push --name a.txt && python3 airlock.py pull
+```
+
+If you touched the web page, open it and check the browser console is clean, in both
+light and dark. If you touched the bridge, `airlock bridge check` walks the whole chain.
+
+Bug reports are just as useful as code. The ones that help most say which machine ran
+what, and paste the output rather than describing it.
 
 ---
 
