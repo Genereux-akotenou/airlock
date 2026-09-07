@@ -614,11 +614,11 @@ pre code{display:block;counter-reset:ln;white-space:pre-wrap;word-break:break-wo
 #bridge.on .blamp{opacity:1}
 #bridge.on .blamp{background:var(--t-del);box-shadow:0 0 0 0 rgba(240,80,70,.55);animation:beat 1.8s infinite}
 @keyframes beat{70%{box-shadow:0 0 0 9px rgba(240,80,70,0)}100%{box-shadow:0 0 0 0 rgba(240,80,70,0)}}
-.bcard{background:var(--panel);border:1px solid var(--line);border-left:2px solid var(--t-del);border-radius:10px;padding:12px 13px;box-shadow:0 10px 30px rgba(0,0,0,.28);font-size:11.5px;color:var(--dim);width:100%}
+.bcard{background:var(--panel);border:1px solid var(--line);border-left:2px solid var(--t-del);border-radius:10px;padding:12px 13px;box-shadow:0 10px 30px rgba(0,0,0,.28);font-size:11.5px;color:var(--dim);width:100%;max-height:min(66vh,560px);overflow-y:auto;overscroll-behavior:contain}
 .bcard b{color:var(--txt);font-weight:600}
 .bcard .cmd{margin-top:7px}
 .bcard .warn{color:var(--t-del);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase}
-.bhead{display:flex;align-items:center;gap:9px;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+.bhead{display:flex;align-items:center;gap:9px;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer;position:sticky;top:-12px;background:var(--panel);padding:12px 0 6px;margin-top:-12px;z-index:1}
 .bhead:hover{border:0}
 .bhead .chev{margin-left:auto;color:var(--dim);font-size:11px;transition:transform .18s}
 .bcard.open .bhead .chev{transform:rotate(90deg)}

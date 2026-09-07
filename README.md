@@ -9,6 +9,13 @@ One file. Standard library only. No `pip install`, no Docker, no build step.
 Drop `airlock.py` on a machine, run it, and both boxes get a shared clipboard for code
 snippets and files - through a browser page or from the terminal.
 
+![The airlock console: a shared drop of code snippets on the left, and the internet
+bridge panel open on the right](illustration/app.png)
+
+<sub>The whole app is one page. Items appear live on every machine; the panel on the
+right is the [internet bridge](#the-internet-bridge), open here with 29 minutes left on
+its timer.</sub>
+
 ```
 personal laptop  ──── LAN ────►  ┌───────────┐  ◄──── LAN ────  lab machine
 (browser + CLI)                  │  airlock  │                  (browser + CLI)
