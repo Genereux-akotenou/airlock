@@ -78,6 +78,29 @@ def is_short_code(value):
     return bool(value) and len(value) <= 16 and bool(re.fullmatch(r"[A-Za-z0-9 _-]+", value))
 
 
+class Presence:
+    """Who is in the room. Every authed request refreshes that client's clock."""
+
+    TTL = 45          # a browser long-polls at least every 25s, so this is generous
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.seen = {}
+
+    def touch(self, who):
+        who = (who or "").strip()[:40]
+        if not who:
+            return
+        with self.lock:
+            self.seen[who] = time.time()
+
+    def live(self):
+        cutoff = time.time() - self.TTL
+        with self.lock:
+            self.seen = {k: v for k, v in self.seen.items() if v > cutoff}
+            return sorted(self.seen)
+
+
 class Throttle:
     """Sliding-window lockout on failed tokens - what makes a short code safe."""
 
@@ -303,6 +326,7 @@ class ProxyState:
         self.server = None
         self.thread = None
         self.timer = None
+        self.closing = None
         self.started = 0
         self.expires = 0
         self.requests = 0
@@ -341,11 +365,20 @@ class ProxyState:
             return False, "the internet bridge was not enabled on this server"
         if self.running():
             return True, "already open"
+        # A previous close may still be tearing its listener down; wait for it,
+        # otherwise reopening races against our own socket and fails to bind.
+        if self.closing and self.closing.is_alive():
+            self.closing.join(timeout=5)
         bound = type("BoundProxy", (ProxyHandler,), {"state": self})
-        try:
-            srv = ThreadingHTTPServer((self.bind, self.port), bound)
-        except OSError as exc:
-            return False, "cannot bind port %d (%s)" % (self.port, exc)
+        srv = None
+        for attempt in range(4):
+            try:
+                srv = ThreadingHTTPServer((self.bind, self.port), bound)
+                break
+            except OSError as exc:
+                if attempt == 3:
+                    return False, ("cannot bind port %d (%s)" % (self.port, exc))
+                time.sleep(0.4)
         srv.daemon_threads = True
         self.server = srv
         self.thread = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -365,7 +398,15 @@ class ProxyState:
             self.timer = None
         srv, self.server = self.server, None
         if srv:
-            threading.Thread(target=srv.shutdown, daemon=True).start()
+            def teardown(s=srv):
+                try:
+                    s.shutdown()          # stop the accept loop
+                finally:
+                    s.server_close()      # and RELEASE the listening socket
+            # shutdown() blocks until serve_forever exits, and stop() can be
+            # called from a request thread, so this has to happen off to the side.
+            self.closing = threading.Thread(target=teardown, daemon=True)
+            self.closing.start()
         self.started = self.expires = 0
         return True, "closed"
 
@@ -563,6 +604,9 @@ header h1 span{color:var(--accent)}
 .who .pen{opacity:0;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);transition:.15s}
 .who:hover .pen{opacity:1}
 .chip{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
+.live{display:flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid var(--line);border-radius:20px;font-size:11.5px;color:var(--dim);white-space:nowrap}
+.live svg{width:11px;height:11px;fill:currentColor;opacity:.8}
+.live b{color:var(--txt);font-weight:600}
 .meta .chip{width:7px;height:7px;margin-right:5px;vertical-align:baseline}
 main{max-width:960px;margin:0 auto;padding:18px;width:100%;flex:1 0 auto}
 .compose{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:12px;box-shadow:var(--shadow)}
@@ -577,6 +621,7 @@ button.icon{padding:6px 9px;font-size:13px;line-height:1}
 input[type=search]{flex:1;min-width:160px;background:var(--input);border:1px solid var(--line);border-radius:7px;color:var(--txt);padding:7px 10px;font:12px ui-monospace,Menlo,monospace;outline:none}
 .item{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:11px 13px;margin-top:12px;box-shadow:var(--shadow)}
 .item h3{margin:0;font-size:13px;font-weight:600;word-break:break-all}
+.thumb{display:block;margin-top:9px;max-width:100%;max-height:320px;width:auto;border:1px solid var(--line);border-radius:8px;background:var(--input)}
 .meta{color:var(--dim);font-size:11.5px;margin-top:3px}
 pre{margin:9px 0 0;background:var(--input);border:1px solid var(--line);border-radius:8px;padding:10px 10px 10px 0;max-height:300px;overflow:auto;font-size:12.5px;line-height:1.55;tab-size:2}
 pre code{display:block;counter-reset:ln;white-space:pre-wrap;word-break:break-word}
@@ -666,6 +711,7 @@ progress{width:100%;margin-top:8px;height:4px}
   <h1>air<span>lock</span></h1>
   <div class="spacer"></div>
   <button class="who" id="me" onclick="renameMe()" title="Click to rename yourself"></button>
+  <span class="live" id="live" hidden></span>
   <button class="icon" onclick="openDocs()" title="How to use airlock">docs</button>
   <button class="icon" id="theme" onclick="toggleTheme()" title="Light / dark"></button>
 </header>
@@ -731,7 +777,11 @@ const tok = new URLSearchParams(location.search).get('t') || localStorage.getIte
 if (tok) localStorage.setItem('airlock_token', tok);
 let items = [], version = 0, me = '';
 
-function H(){ return tok ? {'X-Airlock-Token': tok} : {}; }
+function H(){
+  const h = me ? {'X-Airlock-From': encodeURIComponent(me)} : {};
+  if(tok) h['X-Airlock-Token'] = tok;
+  return h;
+}
 function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.classList.add('on'); setTimeout(()=>t.classList.remove('on'),1400); }
 function bytes(n){ const u=['B','KB','MB','GB']; let i=0; while(n>=1024&&i<3){n/=1024;i++;} return n.toFixed(i?1:0)+u[i]; }
 function ago(ts){ const s=(Date.now()/1000)-ts; if(s<60)return Math.max(0,s|0)+'s ago'; if(s<3600)return (s/60|0)+'m ago'; if(s<86400)return (s/3600|0)+'h ago'; return new Date(ts*1000).toLocaleString(); }
@@ -772,6 +822,17 @@ function hueOf(name){
 }
 function chip(name){
   return '<i class="chip" style="background:hsl(' + hueOf(name) + ' 62% 52%)"></i>';
+}
+
+const USER_ICON = '<svg viewBox="0 0 16 16"><circle cx="8" cy="5" r="3"/>'
+  + '<path d="M2 15c0-3.3 2.7-5 6-5s6 1.7 6 5z"/></svg>';
+
+function paintLive(names, count){
+  const el = document.getElementById('live');
+  if(!count){ el.hidden = true; return; }
+  el.hidden = false;
+  el.innerHTML = USER_ICON + '<b>' + count + '</b>';
+  el.title = count === 1 ? 'only you are here' : 'here now: ' + names.join(', ');
 }
 
 function paintMe(){
@@ -1268,6 +1329,7 @@ async function load(){
     if(r.status===401){ document.getElementById('list').innerHTML='<div class="empty">Unauthorized. Open the link with ?t=&lt;token&gt;</div>'; return; }
     const d = await r.json();
     items = d.items; version = d.version;
+    paintLive(d.live || [], d.live_count || 0);
     document.getElementById('me').title = 'you are ' + me + ' at ' + (d.you || '?') + ' - click to rename';
     const total = items.reduce((n, i) => n + i.size, 0);
     document.getElementById('stats').textContent =
@@ -1285,10 +1347,14 @@ function render(){
   if(!rows.length){ list.innerHTML = '<div class="empty">nothing in the lock</div>'; return; }
   list.innerHTML = rows.map(i => {
     const lang = i.kind === 'text' ? detectLang(i.name, i.preview || '') : null;
+    const isImg = i.kind === 'file' && /^image\//.test(i.mime || '');
+    const raw = '/api/items/' + i.id + '/raw?t=' + encodeURIComponent(tok);
+    const tag = isImg ? (i.mime.split('/')[1] || 'image') : (lang || 'file');
     return `
     <div class="item">
-      <div><span class="tag ${i.kind==='file'?'file':'lang'}">${lang || 'file'}</span><span class="meta">${bytes(i.size)} · ${chip(i.from)}${esc(i.from)} · ${ago(i.created)}</span></div>
-      <h3>${esc(i.name)}</h3>
+      <div><span class="tag ${i.kind==='file'?'file':'lang'}">${esc(tag)}</span><span class="meta">${bytes(i.size)} · ${chip(i.from)}${esc(i.from)} · ${ago(i.created)}</span></div>
+      ${isSnippet(i.name) ? '' : `<h3>${esc(i.name)}</h3>`}
+      ${isImg ? `<a href="${raw}" target="_blank" rel="noopener"><img class="thumb" src="${raw}" alt="${esc(i.name)}" loading="lazy"></a>` : ''}
       ${i.kind==='text' ? `<pre><code>${highlight(i.preview||'', lang)}</code></pre>` : ''}
       <div class="row">
         ${i.kind==='text' ? `<button onclick="copy('${i.id}')">Copy</button>` : ''}
@@ -1325,10 +1391,15 @@ function sendText(){
   const el = document.getElementById('txt');
   const v = el.value;
   if(!v.trim()) return;
-  const first = v.trim().split('\n')[0].slice(0,48).replace(/[^\w.\- ]+/g,'_') || 'snippet';
-  post(new Blob([v]), 'text', first + '.txt', 'text/plain; charset=utf-8');
+  // Naming a snippet after its own first line produced things like
+  // "def hello():.txt". A plain timestamp is honest and keeps downloads unique.
+  const t = new Date();
+  const stamp = [t.getHours(), t.getMinutes(), t.getSeconds()]
+    .map(function(n){ return String(n).padStart(2,'0'); }).join('');
+  post(new Blob([v]), 'text', 'snippet-' + stamp + '.txt', 'text/plain; charset=utf-8');
   el.value = '';
 }
+function isSnippet(name){ return /^snippet-\d{6}\.txt$/.test(name || ''); }
 function sendFiles(files){ for(const f of files) post(f, 'file', f.name, f.type||'application/octet-stream'); }
 
 document.getElementById('fileInput').addEventListener('change', e => { sendFiles(e.target.files); e.target.value=''; });
@@ -1374,6 +1445,7 @@ class Handler(BaseHTTPRequestHandler):
     token = None
     throttle = None
     proxy = None
+    presence = None
 
     # -- helpers -----------------------------------------------------------
 
@@ -1394,6 +1466,7 @@ class Handler(BaseHTTPRequestHandler):
     def gate(self):
         """True when the request may proceed; otherwise the reply is already sent."""
         if not self.token:
+            self.presence.touch(_unquote(self.headers.get("X-Airlock-From") or ""))
             return True
         ip = self.client_address[0]
         wait = self.throttle.blocked(ip)
@@ -1404,6 +1477,7 @@ class Handler(BaseHTTPRequestHandler):
         given = self.headers.get("X-Airlock-Token") or self.qs().get("t") or ""
         if self.token_ok(given):
             self.throttle.clear(ip)
+            self.presence.touch(_unquote(self.headers.get("X-Airlock-From") or ""))
             return True
         self.throttle.fail(ip)
         self.json(401, {"error": "unauthorized"})
@@ -1456,10 +1530,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/items":
+            live = self.presence.live()
             return self.json(200, {
                 "items": self.store.list(),
                 "version": self.store.version,
                 "you": self.client_address[0],
+                "live": live,
+                "live_count": len(live),
             })
 
         if path == "/api/wait":
@@ -1634,6 +1711,7 @@ def cmd_serve(args):
     Handler.store = Store(root, keep=args.keep, cap_bytes=args.cap * 1024 ** 3)
     Handler.token = token
     Handler.throttle = Throttle()
+    Handler.presence = Presence()
 
     allow = PROXY_ALLOW
     if args.proxy_allow:
