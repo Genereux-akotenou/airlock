@@ -327,6 +327,7 @@ class ProxyState:
         self.thread = None
         self.timer = None
         self.closing = None
+        self.auto = False          # auto-renew: keep going past the timer
         self.started = 0
         self.expires = 0
         self.requests = 0
@@ -386,11 +387,25 @@ class ProxyState:
         span = self.minutes if minutes is None else minutes
         self.started = time.time()
         self.expires = (self.started + span * 60) if span else 0
-        if span:
-            self.timer = threading.Timer(span * 60, self.stop)
-            self.timer.daemon = True
-            self.timer.start()
+        self._arm(span)
         return True, "open"
+
+    def _arm(self, span):
+        if not span:
+            self.expires = 0
+            return
+        self.expires = time.time() + span * 60
+        self.timer = threading.Timer(span * 60, self._expire)
+        self.timer.daemon = True
+        self.timer.start()
+
+    def _expire(self):
+        """Timer fired. Renew if auto-renew is on, otherwise shut the gap."""
+        if self.auto and self.running():
+            self.started = time.time()
+            self._arm(self.minutes)
+            return
+        self.stop()
 
     def stop(self):
         if self.timer:
@@ -423,6 +438,7 @@ class ProxyState:
             "allow": self.allow,
             "unrestricted": not self.allow,
             "minutes": self.minutes,
+            "auto": self.auto,
             "expires_in": max(0, left),
             "requests": self.requests,
             "blocked": self.blocked,
@@ -599,10 +615,12 @@ header h1 span{color:var(--accent)}
 .dot.off{background:var(--err);box-shadow:0 0 8px var(--err)}
 .spacer{flex:1}
 .host{color:var(--dim);font-size:12px}
-.who{display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:20px;font-size:11.5px;color:var(--dim);background:transparent}
+.who{display:inline-flex;align-items:center;gap:7px;padding:5px 11px;border-radius:20px;font-size:11.5px;color:var(--dim);background:transparent;max-width:260px}
 .who:hover{color:var(--txt)}
-.who .pen{opacity:0;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);transition:.15s}
-.who:hover .pen{opacity:1}
+.who .nm{max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* the hint must not reserve width while it is invisible, or the pill sits wider than the name */
+.who .pen{opacity:0;max-width:0;overflow:hidden;white-space:nowrap;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--accent);transition:opacity .15s,max-width .15s}
+.who:hover .pen{opacity:1;max-width:70px}
 .chip{width:9px;height:9px;border-radius:50%;flex:none;display:inline-block}
 .live{display:flex;align-items:center;gap:5px;padding:4px 9px;border:1px solid var(--line);border-radius:20px;font-size:11.5px;color:var(--dim);white-space:nowrap}
 .live svg{width:11px;height:11px;fill:currentColor;opacity:.8}
@@ -618,7 +636,6 @@ button:hover{border-color:var(--accent);color:var(--hov)}
 button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:700}
 button.icon{padding:6px 9px;font-size:13px;line-height:1}
 .hint{color:var(--dim);font-size:12px}
-.kbd{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:2px 6px}
 input[type=search]{flex:1;min-width:160px;background:var(--input);border:1px solid var(--line);border-radius:7px;color:var(--txt);padding:7px 10px;font:12px ui-monospace,Menlo,monospace;outline:none}
 .item{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:11px 13px;margin-top:12px;box-shadow:var(--shadow)}
 .item h3{margin:0;font-size:13px;font-weight:600;word-break:break-all}
@@ -669,6 +686,14 @@ pre code{display:block;counter-reset:ln;white-space:pre-wrap;word-break:break-wo
 .bhead .chev{margin-left:auto;color:var(--dim);font-size:11px;transition:transform .18s}
 .bcard.open .bhead .chev{transform:rotate(90deg)}
 .btally{margin-top:6px;font-size:11px}
+.autorow{display:flex;align-items:center;gap:9px;width:100%;margin-top:9px;padding:7px 9px;border:1px solid var(--line);border-radius:7px;background:var(--input);color:var(--dim);font:inherit;font-size:11px;cursor:pointer;text-align:left}
+.autorow:hover{border-color:var(--t-del)}
+.autorow b{margin-left:auto;font-size:10px;letter-spacing:.1em}
+.autorow .sw{width:26px;height:14px;border-radius:8px;background:var(--line);position:relative;flex:none;transition:.18s}
+.autorow .sw::after{content:'';position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:var(--panel);transition:.18s}
+.autorow.on{color:var(--t-del);border-color:var(--t-del)}
+.autorow.on .sw{background:var(--t-del)}
+.autorow.on .sw::after{transform:translateX(12px)}
 .bbody{margin-top:10px;padding-top:10px;border-top:1px solid var(--line)}
 [hidden]{display:none!important}
 #docs{position:fixed;inset:0;background:rgba(8,12,17,.55);backdrop-filter:blur(3px);display:flex;align-items:flex-start;justify-content:center;padding:5vh 16px;z-index:60;overflow:auto}
@@ -721,7 +746,6 @@ progress{width:100%;margin-top:8px;height:4px}
     <textarea id="txt" placeholder="Paste code, a log, a command… then Enter to send. Shift+Enter for a new line, or drop a file anywhere."></textarea>
     <div class="row">
       <button class="primary" onclick="sendText()">Send text</button>
-      <span class="kbd">Enter</span>
       <button onclick="fileInput.click()">Send file…</button>
       <input type="file" id="fileInput" multiple hidden>
       <span class="spacer"></span>
@@ -839,7 +863,7 @@ function paintLive(names, count){
 
 function paintMe(){
   document.getElementById('me').innerHTML =
-    chip(me) + '<span>' + esc(me) + '</span><span class="pen">rename</span>';
+    chip(me) + '<span class="nm">' + esc(me) + '</span><span class="pen">rename</span>';
 }
 
 function renameMe(){
@@ -1012,8 +1036,10 @@ function paintBridge(){
   const on = !!bridgeSt.running;
   box.classList.toggle('on', on);
   const left = bridgeSt.expires_in || 0;
-  const clock = left ? '  ' + Math.floor(left/60) + ':' + String(left%60).padStart(2,'0') : '';
-  document.getElementById('btext').textContent = on ? ('internet open' + clock) : 'internet bridge';
+  const clock = (left && !bridgeSt.auto)
+    ? '  ' + Math.floor(left/60) + ':' + String(left%60).padStart(2,'0') : '';
+  document.getElementById('btext').textContent =
+    on ? ('internet open' + (bridgeSt.auto ? '  \u221e' : clock)) : 'internet bridge';
   const card = document.getElementById('bcard');
   card.hidden = !on;
   if(!on) return;
@@ -1053,7 +1079,8 @@ function paintBridge(){
   // Rebuild only when something actually changed. The clock ticks every second,
   // and re-writing innerHTML that often would cancel any text you were selecting.
   const sig = [addr, cardOpen, bridgeSt.requests, bridgeSt.blocked, bridgeSt.bytes,
-               bridgeSt.unrestricted, (bridgeSt.allow||[]).length].join('|');
+               bridgeSt.unrestricted, (bridgeSt.allow||[]).length,
+               bridgeSt.auto, bridgeSt.master].join('|');
   if(sig === cardSig) return;
   cardSig = sig;
 
@@ -1063,6 +1090,13 @@ function paintBridge(){
     + '<span class="warn">&#9888; the air gap is open</span>'
     + '<span class="chev">&#9656;</span></button>'
     + '<div class="btally">' + tally + '</div>'
+    + (bridgeSt.master ?
+        ('<button class="autorow' + (bridgeSt.auto ? ' on' : '') + '" onclick="toggleAuto()" '
+       + 'title="Only this machine can change it">'
+       + '<span class="sw"></span>'
+       + '<span>keep it open &mdash; renew instead of closing</span>'
+       + '<b>' + (bridgeSt.auto ? 'ON' : 'OFF') + '</b></button>')
+      : '')
     + (cardOpen ?
         ('<div class="bbody">'
        + 'Run these <b>on the isolated machine</b>. Its own pip, npm, git and browser then '
@@ -1076,6 +1110,23 @@ function paintBridge(){
        + '(it is ICMP, not HTTP) - test with curl. Chrome needs its own --user-data-dir, or a '
        + 'running instance swallows the flag.</div></div>')
       : '');
+}
+
+async function toggleAuto(){
+  const want = !(bridgeSt && bridgeSt.auto);
+  if(want && !confirm('Keep the internet bridge open indefinitely?\n\n'
+      + 'It will renew itself instead of closing after ' + (bridgeSt.minutes || 30)
+      + ' minutes. The air gap stays open until you shut it by hand.')) return;
+  try{
+    const r = await fetch('/api/proxy', {method:'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, H()),
+      body: JSON.stringify({auto: want})});
+    if(r.status === 403){ toast('only the server machine can change this'); return; }
+    bridgeSt = await r.json();
+    cardSig = '';
+    paintBridge();
+    toast(bridgeSt.auto ? 'auto-renew on' : 'auto-renew off');
+  }catch(e){ toast('failed'); }
 }
 
 async function toggleBridge(){
@@ -1473,6 +1524,11 @@ class Handler(BaseHTTPRequestHandler):
             return hmac.compare_digest(normalize_code(given), normalize_code(self.token))
         return False
 
+    def is_master(self):
+        """Is this request coming from the machine that runs the server?"""
+        ip = self.client_address[0]
+        return ip in ("127.0.0.1", "::1", "localhost") or ip in lan_ips()
+
     def gate(self):
         """True when the request may proceed; otherwise the reply is already sent."""
         if not self.token:
@@ -1557,7 +1613,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(200, {"version": self.store.wait(since)})
 
         if path == "/api/proxy":
-            return self.json(200, self.proxy.status())
+            out = self.proxy.status()
+            out["master"] = self.is_master()
+            return self.json(200, out)
 
         if path in ("/bridge.sh", "/api/bridge.sh"):
             # Meant to be eval'd on the isolated machine, which has no airlock
@@ -1627,13 +1685,24 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(size) or b"{}")
             except (ValueError, OSError):
                 body = {}
-            want_on = bool(body.get("on"))
-            minutes = body.get("minutes")
-            if want_on:
-                ok, msg = self.proxy.start(int(minutes) if minutes else None)
-            else:
-                ok, msg = self.proxy.stop()
+            ok, msg = True, "unchanged"
+
+            if "auto" in body:
+                if not self.is_master():
+                    return self.json(403, {"error": "auto-renew can only be changed "
+                                                    "on the machine running the server"})
+                self.proxy.auto = bool(body["auto"])
+                msg = "auto-renew " + ("on" if self.proxy.auto else "off")
+
+            if "on" in body:
+                minutes = body.get("minutes")
+                if body["on"]:
+                    ok, msg = self.proxy.start(int(minutes) if minutes else None)
+                else:
+                    ok, msg = self.proxy.stop()
+
             out = self.proxy.status()
+            out["master"] = self.is_master()
             out["message"] = msg
             return self.json(200 if ok else 409, out)
 
@@ -1729,6 +1798,7 @@ def cmd_serve(args):
             else [d.strip().lower() for d in args.proxy_allow.split(",") if d.strip()]
     Handler.proxy = ProxyState(enabled=args.enable_proxy, port=args.proxy_port,
                                allow=allow, minutes=args.proxy_minutes, bind=args.bind)
+    Handler.proxy.auto = args.proxy_auto
     if args.enable_proxy and args.proxy_on:
         Handler.proxy.start()
 
@@ -2038,8 +2108,9 @@ def _bridge_report(host, token, st):
         return
     if st.get("running"):
         left = st.get("expires_in") or 0
-        print("bridge: OPEN on %s:%d%s" % (where, st["port"],
-              ("  (closes in %d min)" % ((left + 59) // 60)) if left else ""))
+        when = ("  (auto-renews, next in %d min)" % ((left + 59) // 60)) if st.get("auto") and left \
+            else (("  (closes in %d min)" % ((left + 59) // 60)) if left else "  (no auto-close)")
+        print("bridge: OPEN on %s:%d%s" % (where, st["port"], when))
         print()
         parts = urllib.parse.urlsplit(host)
         srv = "%s://%s:%s" % (parts.scheme or "http", where, parts.port or 8787)
@@ -2349,6 +2420,8 @@ def main():
     p.add_argument("--proxy-port", type=int, default=PROXY_PORT)
     p.add_argument("--proxy-minutes", type=int, default=PROXY_MINUTES,
                    help="auto-close after N minutes (0 = never, default %d)" % PROXY_MINUTES)
+    p.add_argument("--proxy-auto", action="store_true",
+                   help="start with auto-renew on, so the bridge never times out")
     p.add_argument("--proxy-allow", metavar="DOMAINS",
                    help="comma-separated allowlist, or 'any' to drop it (default: package mirrors)")
     p.add_argument("--keep", type=int, default=200, help="max items retained")
