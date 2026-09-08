@@ -618,6 +618,7 @@ button:hover{border-color:var(--accent);color:var(--hov)}
 button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:700}
 button.icon{padding:6px 9px;font-size:13px;line-height:1}
 .hint{color:var(--dim);font-size:12px}
+.kbd{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);border:1px solid var(--line);border-radius:4px;padding:2px 6px}
 input[type=search]{flex:1;min-width:160px;background:var(--input);border:1px solid var(--line);border-radius:7px;color:var(--txt);padding:7px 10px;font:12px ui-monospace,Menlo,monospace;outline:none}
 .item{border:1px solid var(--line);background:var(--panel);border-radius:10px;padding:11px 13px;margin-top:12px;box-shadow:var(--shadow)}
 .item h3{margin:0;font-size:13px;font-weight:600;word-break:break-all}
@@ -717,9 +718,10 @@ progress{width:100%;margin-top:8px;height:4px}
 </header>
 <main>
   <div class="compose">
-    <textarea id="txt" placeholder="Paste code, a log, a command… then Cmd/Ctrl+Enter. Or drop a file anywhere."></textarea>
+    <textarea id="txt" placeholder="Paste code, a log, a command… then Enter to send. Shift+Enter for a new line, or drop a file anywhere."></textarea>
     <div class="row">
       <button class="primary" onclick="sendText()">Send text</button>
+      <span class="kbd">Enter</span>
       <button onclick="fileInput.click()">Send file…</button>
       <input type="file" id="fileInput" multiple hidden>
       <span class="spacer"></span>
@@ -1403,7 +1405,15 @@ function isSnippet(name){ return /^snippet-\d{6}\.txt$/.test(name || ''); }
 function sendFiles(files){ for(const f of files) post(f, 'file', f.name, f.type||'application/octet-stream'); }
 
 document.getElementById('fileInput').addEventListener('change', e => { sendFiles(e.target.files); e.target.value=''; });
-document.getElementById('txt').addEventListener('keydown', e => { if((e.metaKey||e.ctrlKey)&&e.key==='Enter') sendText(); });
+document.getElementById('txt').addEventListener('keydown', e => {
+  if(e.key !== 'Enter') return;
+  // Enter validates and sends. Shift+Enter is the line break, and the IME
+  // composition guard stops accented input from submitting mid-word.
+  if(e.isComposing || e.keyCode === 229) return;
+  if(e.shiftKey || e.altKey) return;
+  e.preventDefault();
+  sendText();
+});
 document.addEventListener('paste', e => { const f=[...(e.clipboardData?.files||[])]; if(f.length){ e.preventDefault(); sendFiles(f);} });
 let dc = 0;
 addEventListener('dragenter', e => { e.preventDefault(); if(++dc) document.getElementById('drop').classList.add('on'); });
