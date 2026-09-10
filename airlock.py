@@ -42,6 +42,132 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 VERSION = "1.0.0"
+
+MAIN_EPILOG = """
+getting started
+  airlock serve --token lab42                 start the server here
+  airlock link 192.168.1.42:8787 lab42        join it from the other machine
+  airlock help serve                          full options for any command
+
+moving things
+  airlock push notes.md report.pdf            send files
+  git diff | airlock push --name fix.patch    send anything on stdin
+  airlock pull                                newest text item to stdout
+  airlock pull --out .                        newest item, saved as a file
+  airlock watch ~/inbox                       keep a folder in sync, live
+  airlock ls / rm <id|all>                    list, delete
+
+who you are
+  airlock alias "Genereux"                    your name in the room
+
+lending your internet (off unless armed with: serve --enable-proxy)
+  airlock bridge on                           open it
+  airlock bridge status                       what has gone through it
+  airlock bridge check                        diagnose, from the isolated machine
+  airlock bridge off                          shut it
+
+running it for real
+  airlock service install --token lab42       background, restarts on boot
+  airlock deploy user@lab                     copy this script to a remote and run it
+  airlock tunnel user@lab                     reach it over ssh when the LAN cannot
+
+Every client command takes --host and --token, and reads AIRLOCK_HOST,
+AIRLOCK_TOKEN and AIRLOCK_ALIAS from the environment.
+Full manual: README.md, or the docs button in the web page.
+"""
+
+EPILOGS = {
+ "serve": """
+examples
+  airlock serve                                a random typeable code
+  airlock serve --token lab42                  a code you choose
+  airlock serve --bind 127.0.0.1               loopback only, for use over an ssh tunnel
+  airlock serve --enable-proxy                 also arm the internet bridge (see: airlock help bridge)
+
+The code is generated once and kept in --dir/token, so it survives restarts.
+""",
+ "link": """
+examples
+  airlock link 'http://192.168.1.42:8787/?t=lab42'    paste the printed url
+  airlock link 192.168.1.42:8787 lab42                or host and code apart
+
+Saved to ~/.config/airlock/config.json.
+""",
+ "push": """
+examples
+  airlock push a.py b.py                       one or more files
+  git diff | airlock push --name fix.patch     stdin, named
+  airlock push big.csv --as lab                under a one-off pseudonym
+""",
+ "pull": """
+examples
+  airlock pull                                 newest text item to stdout
+  airlock pull > fix.patch                     so redirection just works
+  airlock pull --out ./inbox --all             every item, as files
+  airlock pull 5bc931 --out .                  one item by (partial) id
+  airlock pull --rm                            and clear it from the server
+""",
+ "watch": """
+examples
+  airlock watch ~/inbox                        new items land here as they arrive
+  airlock watch ~/inbox --catchup              also take what is already there
+  airlock watch ~/inbox --rm                   clear each item from the server after
+
+Remembers what it took in <dir>/.airlock-seen, so restarting is cheap.
+""",
+ "alias": """
+examples
+  airlock alias                                show your name
+  airlock alias new                            roll a fresh one
+  airlock alias "Genereux"                     pick your own
+""",
+ "bridge": """
+The bridge lends the isolated machine YOUR internet. It is off unless the
+server was started with --enable-proxy, and it closes itself after 30 minutes.
+
+examples
+  airlock bridge on                            open it
+  airlock bridge on --minutes 120              with a longer leash
+  airlock bridge status                        state, policy, and what went through
+  airlock bridge check                         run ON the isolated machine to diagnose
+  airlock bridge firefox                       a throwaway proxied browser there
+  airlock bridge off                           shut it
+
+On the isolated machine, one line sets up the shell:
+  eval "$(curl -s 'http://<host>:8787/bridge.sh?t=<code>')"
+ping will never work through it - it is ICMP, not HTTP. Test with curl.
+""",
+ "service": """
+examples
+  airlock service install --token lab42        background, and again after a reboot
+  airlock service install --token lab42 --port 9000
+  airlock service status | logs | uninstall
+  airlock service print                        show the unit, install nothing
+
+systemd user unit on Linux, LaunchAgent on macOS. No root needed.
+On Linux, to keep it up with nobody logged in:  sudo loginctl enable-linger $USER
+Do not put --enable-proxy here: it would re-arm the air gap on every boot.
+""",
+ "rm": """
+examples
+  airlock rm 5bc931                            one item, by (partial) id
+  airlock rm all                               empty the lock
+""",
+ "deploy": """
+examples
+  airlock deploy user@lab                      scp this script over and start it
+  airlock deploy user@lab --no-start           copy only
+""",
+ "tunnel": """
+Use when the isolated machine cannot reach you, but you can ssh into it.
+It publishes your local server on the remote's own localhost, encrypted.
+
+examples
+  airlock tunnel user@lab                      then open http://127.0.0.1:8787 there
+""",
+}
+
+
 DEFAULT_PORT = 8787
 DEFAULT_ROOT = os.path.expanduser("~/.airlock")
 CONFIG_PATH = os.path.expanduser("~/.config/airlock/config.json")
@@ -2517,11 +2643,24 @@ def run(cmd, check=True):
 # --------------------------------------------------------------------------
 
 def main():
-    ap = argparse.ArgumentParser(prog="airlock", description="two-way drop box for an air-gapped machine")
+    ap = argparse.ArgumentParser(
+        prog="airlock",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="airlock - a shared clipboard, and internet, for an isolated machine.\n\n"
+                    "Run the server on ONE machine; every other machine talks to it over the\n"
+                    "LAN, through the web page or from this command line.",
+        epilog=MAIN_EPILOG)
     ap.add_argument("--version", action="version", version="airlock " + VERSION)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+    parsers = {}
 
-    p = sub.add_parser("serve", help="run the server")
+    def newcmd(name, help_text, epilog=None):
+        q = sub.add_parser(name, help=help_text, description=help_text, epilog=epilog,
+                           formatter_class=argparse.RawDescriptionHelpFormatter)
+        parsers[name] = q
+        return q
+
+    p = newcmd("serve", "run the server", EPILOGS.get("serve"))
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
     p.add_argument("--bind", default="0.0.0.0")
     p.add_argument("--dir", default=DEFAULT_ROOT)
@@ -2550,12 +2689,12 @@ def main():
         parser.add_argument("--host", help="http://ip:port of the server")
         parser.add_argument("--token")
 
-    p = sub.add_parser("link", help="remember a server: paste the ?t= link, or host + code")
+    p = newcmd("link", "remember a server: paste the ?t= link, or host + code", EPILOGS.get("link"))
     p.add_argument("url", help="full ?t= url, or just 192.168.1.42:8787")
     p.add_argument("code", nargs="?", help="the short code, when not part of the url")
     p.set_defaults(func=cmd_link)
 
-    p = sub.add_parser("push", help="send files, or stdin")
+    p = newcmd("push", "send files, or stdin", EPILOGS.get("push"))
     p.add_argument("files", nargs="*")
     p.add_argument("--name", help="name to use for stdin")
     p.add_argument("--as", dest="sender", help="send under a different pseudonym, just this once")
@@ -2564,7 +2703,7 @@ def main():
     client_args(p)
     p.set_defaults(func=cmd_push)
 
-    p = sub.add_parser("pull", help="fetch the latest item (or one by id)")
+    p = newcmd("pull", "fetch the latest item (or one by id)", EPILOGS.get("pull"))
     p.add_argument("id", nargs="?")
     p.add_argument("--out", help="directory to save into")
     p.add_argument("--all", action="store_true", help="pull everything")
@@ -2574,11 +2713,11 @@ def main():
     client_args(p)
     p.set_defaults(func=cmd_pull)
 
-    p = sub.add_parser("alias", help="show or change your pseudonym")
+    p = newcmd("alias", "show or change your pseudonym", EPILOGS.get("alias"))
     p.add_argument("name", nargs="?", help="the new name, or 'new' to roll a fresh one")
     p.set_defaults(func=cmd_alias)
 
-    p = sub.add_parser("bridge", help="open/close the internet bridge for the isolated machine")
+    p = newcmd("bridge", "open/close the internet bridge for the isolated machine", EPILOGS.get("bridge"))
     p.add_argument("action", nargs="?", default="status",
                    choices=["on", "off", "status", "check", "firefox"],
                    help="'check' diagnoses FROM the isolated machine, "
@@ -2591,16 +2730,16 @@ def main():
     client_args(p)
     p.set_defaults(func=cmd_bridge)
 
-    p = sub.add_parser("ls", help="list items")
+    p = newcmd("ls", "list items", EPILOGS.get("ls"))
     client_args(p)
     p.set_defaults(func=cmd_ls)
 
-    p = sub.add_parser("rm", help="delete an item, or 'all'")
+    p = newcmd("rm", "delete an item, or 'all'", EPILOGS.get("rm"))
     p.add_argument("id")
     client_args(p)
     p.set_defaults(func=cmd_rm)
 
-    p = sub.add_parser("watch", help="auto-download new items into a folder")
+    p = newcmd("watch", "auto-download new items into a folder", EPILOGS.get("watch"))
     p.add_argument("dir")
     p.add_argument("--catchup", action="store_true", help="also pull items already in the lock")
     p.add_argument("--rm", action="store_true")
@@ -2608,13 +2747,13 @@ def main():
     client_args(p)
     p.set_defaults(func=cmd_watch)
 
-    p = sub.add_parser("service", help="run airlock in the background, and again after a reboot")
+    p = newcmd("service", "run airlock in the background, and again after a reboot", EPILOGS.get("service"))
     p.add_argument("action", choices=["install", "status", "logs", "uninstall", "print"])
     p.add_argument("serve_args", nargs=argparse.REMAINDER,
                    help="flags passed straight to `airlock serve`, e.g. --token lab42")
     p.set_defaults(func=cmd_service)
 
-    p = sub.add_parser("deploy", help="scp this script to a remote host and start it")
+    p = newcmd("deploy", "scp this script to a remote host and start it", EPILOGS.get("deploy"))
     p.add_argument("target", help="user@host")
     p.add_argument("--path", default="~/airlock.py")
     p.add_argument("--port", type=int, default=DEFAULT_PORT)
@@ -2622,13 +2761,18 @@ def main():
     p.add_argument("--no-start", dest="start", action="store_false")
     p.set_defaults(func=cmd_deploy)
 
-    p = sub.add_parser("tunnel", help="push this machine's server onto a remote over ssh")
+    p = newcmd("tunnel", "push this machine's server onto a remote over ssh", EPILOGS.get("tunnel"))
     p.add_argument("target", help="user@host")
     p.add_argument("--remote-port", type=int, default=DEFAULT_PORT)
     p.add_argument("--port", type=int, default=DEFAULT_PORT, help="local server port")
     p.add_argument("--dir", default=DEFAULT_ROOT, help="local store (to read the token)")
     p.add_argument("--token")
     p.set_defaults(func=cmd_tunnel)
+
+    q = newcmd("help", "show help, optionally for one command")
+    q.add_argument("topic", nargs="?", help="the command to explain")
+    q.set_defaults(func=lambda a: (parsers[a.topic].print_help()
+                                   if a.topic in parsers else ap.print_help()))
 
     args = ap.parse_args()
     args.func(args)
