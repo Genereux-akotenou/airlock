@@ -36,7 +36,9 @@ One command, everything switched on, nothing to install:
 
 ```bash
 cd tools/airlock
-python3 airlock.py serve --token lab42 --enable-proxy --proxy-allow any
+python3 airlock.py serve --token lab42 --enable-proxy --proxy-allow any --proxy-on --proxy-auto
+# --proxy-auto : no stop time
+# --proxy-on : isolate machine proxying on the port 8888 have internet without neee dof the ui
 ```
 
 It prints a URL like `http://192.168.1.42:8787/?t=lab42`. Open it in a browser - on this
