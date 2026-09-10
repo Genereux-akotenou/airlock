@@ -81,11 +81,12 @@ python3 airlock.py serve
 4. [Use it](#use-it)
 5. [Who is who](#who-is-who)
 6. [The internet bridge](#the-internet-bridge)
-7. [Cheat sheet](#cheat-sheet) · [All flags](#all-flags)
-8. [Codes](#codes)
-9. [How it works](#how-it-works) · [HTTP API](#http-api)
-10. [Security notes](#security-notes)
-11. [Contributing](#contributing)
+7. [Run it permanently](#run-it-permanently)
+8. [Cheat sheet](#cheat-sheet) · [All flags](#all-flags)
+9. [Codes](#codes)
+10. [How it works](#how-it-works) · [HTTP API](#http-api)
+11. [Security notes](#security-notes)
+12. [Contributing](#contributing)
 
 ---
 
@@ -484,6 +485,56 @@ cannot read the traffic it carries**. It can only see, and log, which host was a
 
 ---
 
+## Run it permanently
+
+To keep airlock up in the background and have it come back after a reboot:
+
+```bash
+airlock service install --token lab42
+airlock service status
+airlock service logs
+airlock service uninstall
+```
+
+One command, both platforms. On **Linux** it writes a systemd *user* unit to
+`~/.config/systemd/user/airlock.service` and enables it; on **macOS** it writes a
+LaunchAgent to `~/Library/LaunchAgents/com.airlock.server.plist` and bootstraps it.
+Neither needs root. `airlock service print` shows the unit without installing anything.
+
+Everything after the action is handed to `serve`, so this works:
+
+```bash
+airlock service install --token lab42 --port 9000 --keep 500
+```
+
+It restarts on crash and starts again when you log in. On Linux, to keep it running
+with **nobody logged in** - the case on a machine you leave on a shelf:
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+`autostart-linux.sh` in this folder does the same thing for people who have not run
+`install.sh` and so have no `airlock` command yet.
+
+### Do not put `--enable-proxy` in the service
+
+It installs happily if you insist, and prints a warning. But a service carrying
+`--enable-proxy --proxy-on --proxy-auto` re-arms and reopens the
+[internet bridge](#the-internet-bridge) on every single boot, with no timer - all three
+safety gates off, forever. Install the service plain, and open the bridge by hand for
+the sessions where you actually want it:
+
+```bash
+airlock service install --token lab42     # the drop box, always up
+airlock bridge on                          # the internet, only when you say so
+```
+
+If you truly want a machine whose whole job is being the lab's uplink, at least drop
+`--proxy-allow any` so only package mirrors are reachable rather than the entire web.
+
+---
+
 ## Cheat sheet
 
 | Command | What it does |
@@ -500,6 +551,7 @@ cannot read the traffic it carries**. It can only see, and log, which host was a
 | `airlock bridge on\|off\|status` | the internet bridge ([above](#the-internet-bridge); needs `serve --enable-proxy`) |
 | `airlock bridge check` | diagnose the bridge from the isolated machine |
 | `airlock bridge firefox` | throwaway proxied browser on the isolated machine |
+| `airlock service install` | run in the background, restart on boot ([below](#run-it-permanently)) |
 | `airlock deploy user@host` | scp this script to a remote and start it |
 | `airlock tunnel user@host` | expose your local server on the remote's localhost |
 
@@ -517,6 +569,9 @@ previewable text), `--binary` (treat stdin as binary).
 **`watch`** - `--catchup`, `--rm`, `--force`.
 
 **`bridge`** - `--minutes N`, and for `firefox`: `--profile`, `--browser`, `--url`.
+
+**`service`** - `install`, `status`, `logs`, `uninstall`, `print`. Anything after the
+action goes to `serve`, e.g. `airlock service install --token lab42 --port 9000`.
 
 **`deploy`** - `--path ~/airlock.py`, `--port`, `--bind`, `--no-start`.
 

@@ -12,6 +12,7 @@ Run the server on ONE machine, both machines talk to it over the LAN
     airlock.py pull [id]                  fetch latest (or a given item)
     airlock.py ls                         list what is in the drop
     airlock.py alias [name]               show or change your pseudonym
+    airlock.py service install|status     run in the background, restart on boot
     airlock.py rm <id|all>                delete
     airlock.py watch <dir>                auto-pull new items into a folder
     airlock.py deploy user@host           copy this script to a remote + run it
@@ -2354,6 +2355,123 @@ def cmd_bridge(args):
 # ssh helpers
 # --------------------------------------------------------------------------
 
+SERVICE_LABEL = "com.airlock.server"
+
+
+def _service_paths():
+    py = sys.executable or "python3"
+    src = os.path.realpath(__file__)
+    if sys.platform == "darwin":
+        return "launchd", py, src, os.path.expanduser(
+            "~/Library/LaunchAgents/%s.plist" % SERVICE_LABEL)
+    return "systemd", py, src, os.path.expanduser("~/.config/systemd/user/airlock.service")
+
+
+def _service_text(kind, py, src, serve_args):
+    argv = " ".join(serve_args)
+    if kind == "systemd":
+        return (
+            "[Unit]\n"
+            "Description=airlock - drop box between this machine and the isolated one\n"
+            "After=network-online.target\nWants=network-online.target\n\n"
+            "[Service]\nType=simple\n"
+            "ExecStart=%s %s serve%s\n"
+            "WorkingDirectory=%s\n"
+            "Restart=always\nRestartSec=3\nEnvironment=PYTHONUNBUFFERED=1\n\n"
+            "[Install]\nWantedBy=default.target\n"
+            % (py, src, (" " + argv) if argv else "", os.path.dirname(src)))
+    log = os.path.expanduser("~/Library/Logs/airlock.log")
+    items = "".join("    <string>%s</string>\n" % a for a in ([src, "serve"] + list(serve_args)))
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n<dict>\n'
+        '  <key>Label</key><string>%s</string>\n'
+        '  <key>ProgramArguments</key>\n  <array>\n'
+        '    <string>%s</string>\n%s'
+        '  </array>\n'
+        '  <key>RunAtLoad</key><true/>\n'
+        '  <key>KeepAlive</key><true/>\n'
+        '  <key>StandardOutPath</key><string>%s</string>\n'
+        '  <key>StandardErrorPath</key><string>%s</string>\n'
+        '</dict>\n</plist>\n' % (SERVICE_LABEL, py, items, log, log))
+
+
+def _svc(cmd, quiet=False):
+    """Run a service tool; say so plainly when the machine has not got it."""
+    try:
+        kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL} if quiet else {}
+        return subprocess.run(cmd, **kw).returncode == 0
+    except FileNotFoundError:
+        print("  (%s is not on this machine - unit written, nothing started)" % cmd[0])
+        return False
+
+
+def cmd_service(args):
+    kind, py, src, unit = _service_paths()
+    extra = [a for a in (args.serve_args or []) if a != "--"]
+    uid = str(os.getuid())
+
+    if args.action == "print":
+        sys.stdout.write(_service_text(kind, py, src, extra))
+        return
+
+    if args.action == "uninstall":
+        if kind == "systemd":
+            _svc(["systemctl", "--user", "disable", "--now", "airlock"], quiet=True)
+            _svc(["systemctl", "--user", "daemon-reload"], quiet=True)
+        else:
+            _svc(["launchctl", "bootout", "gui/%s/%s" % (uid, SERVICE_LABEL)], quiet=True)
+        try:
+            os.remove(unit)
+        except OSError:
+            pass
+        print("airlock service removed (%s)" % unit)
+        return
+
+    if args.action == "status":
+        if kind == "systemd":
+            _svc(["systemctl", "--user", "status", "airlock", "--no-pager"])
+        else:
+            if not os.path.exists(unit):
+                print("not installed. run:  airlock service install --token <code>")
+                return
+            _svc(["launchctl", "print", "gui/%s/%s" % (uid, SERVICE_LABEL)])
+        return
+
+    if args.action == "logs":
+        if kind == "systemd":
+            _svc(["journalctl", "--user", "-u", "airlock", "-f"])
+        else:
+            _svc(["tail", "-f", os.path.expanduser("~/Library/Logs/airlock.log")])
+        return
+
+    # install
+    if any("--enable-proxy" in a for a in extra):
+        print("\n  !! --enable-proxy in a service arms the internet bridge on every boot.")
+        print("     Install without it, and open the bridge by hand when you need it.\n")
+    os.makedirs(os.path.dirname(unit), exist_ok=True)
+    with open(unit, "w") as fh:
+        fh.write(_service_text(kind, py, src, extra))
+
+    if kind == "systemd":
+        _svc(["systemctl", "--user", "daemon-reload"], quiet=True)
+        _svc(["systemctl", "--user", "enable", "--now", "airlock"])
+        after = "sudo loginctl enable-linger %s   # keep it up with nobody logged in" \
+                % os.environ.get("USER", "$USER")
+    else:
+        _svc(["launchctl", "bootout", "gui/%s/%s" % (uid, SERVICE_LABEL)], quiet=True)
+        _svc(["launchctl", "bootstrap", "gui/%s" % uid, unit])
+        after = "logs go to ~/Library/Logs/airlock.log"
+
+    print("airlock service installed (%s)" % kind)
+    print("  unit   %s" % unit)
+    print("  runs   %s %s serve %s" % (py, src, " ".join(extra)))
+    print("  %s" % after)
+    print("\n  airlock service status | logs | uninstall")
+
+
 def cmd_deploy(args):
     me = os.path.abspath(__file__)
     remote_path = args.path
@@ -2489,6 +2607,12 @@ def main():
     p.add_argument("--force", action="store_true")
     client_args(p)
     p.set_defaults(func=cmd_watch)
+
+    p = sub.add_parser("service", help="run airlock in the background, and again after a reboot")
+    p.add_argument("action", choices=["install", "status", "logs", "uninstall", "print"])
+    p.add_argument("serve_args", nargs=argparse.REMAINDER,
+                   help="flags passed straight to `airlock serve`, e.g. --token lab42")
+    p.set_defaults(func=cmd_service)
 
     p = sub.add_parser("deploy", help="scp this script to a remote host and start it")
     p.add_argument("target", help="user@host")
