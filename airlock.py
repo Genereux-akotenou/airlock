@@ -461,6 +461,7 @@ class ProxyState:
         self.blocked = 0
         self.bytes = 0
         self.recent = []
+        self.clients = set()       # machines that switched the bridge on for themselves
 
     # -- policy ------------------------------------------------------------
 
@@ -472,6 +473,17 @@ class ProxyState:
             if host == rule or host.endswith("." + rule):
                 return True
         return False
+
+    def admits(self, ip):
+        """Opening the gap only offers it: each machine must opt in for itself."""
+        return is_local_ip(ip) or ip in self.clients
+
+    def join(self, ip, want):
+        with self.lock:
+            if want:
+                self.clients.add(ip)
+            else:
+                self.clients.discard(ip)
 
     def record(self, host, ok):
         with self.lock:
@@ -550,6 +562,8 @@ class ProxyState:
             self.closing = threading.Thread(target=teardown, daemon=True)
             self.closing.start()
         self.started = self.expires = 0
+        with self.lock:
+            self.clients.clear()       # a reopened gap starts with nobody in it
         return True, "closed"
 
     def status(self):
@@ -567,6 +581,7 @@ class ProxyState:
             "minutes": self.minutes,
             "auto": self.auto,
             "expires_in": max(0, left),
+            "clients": len(self.clients),
             "requests": self.requests,
             "blocked": self.blocked,
             "bytes": self.bytes,
@@ -618,6 +633,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
             return
         sys.stderr.write("  bridge  %s  %s\n" % (self.client_address[0], fmt % args))
 
+    def _not_joined(self):
+        body = (b"airlock bridge: this machine has not switched the internet on.\n"
+                b"Use the button on the airlock page, or unset http_proxy https_proxy.\n")
+        self.send_response(403)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
+        self.close_connection = True
+
     def _refuse(self, host):
         self.state.record(host, False)
         body = ("airlock bridge: %s is not on the allowlist\n" % host).encode()
@@ -632,6 +658,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def do_CONNECT(self):
         host, _, port = self.path.rpartition(":")
         host = host.strip("[]")
+        if not self.state.admits(self.client_address[0]):
+            return self._not_joined()
         if not self.state.permitted(host):
             return self._refuse(host)
         try:
@@ -654,6 +682,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self.send_error(400, "the bridge only takes absolute URLs (set http_proxy)")
             return
         host = parts.hostname
+        if not self.state.admits(self.client_address[0]):
+            return self._not_joined()
         if not self.state.permitted(host):
             return self._refuse(host)
         target = urllib.parse.urlunsplit(("", "", parts.path or "/", parts.query, ""))
@@ -798,6 +828,7 @@ pre code{display:block;counter-reset:ln;white-space:pre-wrap;word-break:break-wo
   background:linear-gradient(180deg,var(--gold-a),var(--gold-b));
   box-shadow:0 6px 22px rgba(0,0,0,.22),inset 0 1px 0 rgba(255,255,255,.10)}
 .bbtn:hover{border-color:var(--gold);box-shadow:0 8px 26px var(--gold-glow),inset 0 1px 0 rgba(255,255,255,.16)}
+.bbtn:disabled{opacity:.4;cursor:not-allowed;filter:grayscale(1);box-shadow:none}
 .blamp{width:8px;height:8px;border-radius:50%;background:var(--gold);opacity:.55;flex:none;transition:.2s}
 #bridge.on .bbtn{color:var(--t-del);border-color:var(--t-del);
   background:linear-gradient(180deg,color-mix(in srgb,var(--t-del) 16%,transparent),color-mix(in srgb,var(--t-del) 9%,transparent))}
@@ -1160,13 +1191,20 @@ function paintBridge(){
   const box = document.getElementById('bridge');
   if(!bridgeSt || !bridgeSt.enabled){ box.hidden = true; return; }
   box.hidden = false;
-  const on = !!bridgeSt.running;
+  const master = !!bridgeSt.master;
+  const on = master ? !!bridgeSt.running : !!bridgeSt.mine;
+  const btn = document.getElementById('bbtn');
+  btn.disabled = !master && !bridgeSt.running;
+  btn.title = master ? 'Open or close the gap for the whole lab'
+    : (bridgeSt.running ? 'Use the host\'s internet on this machine, or stop'
+                        : 'The host has not opened the bridge');
   box.classList.toggle('on', on);
   const left = bridgeSt.expires_in || 0;
   const clock = (left && !bridgeSt.auto)
     ? '  ' + Math.floor(left/60) + ':' + String(left%60).padStart(2,'0') : '';
   document.getElementById('btext').textContent =
-    on ? ('internet open' + (bridgeSt.auto ? '  \u221e' : clock)) : 'internet bridge';
+    on ? ((master ? 'internet open' : 'internet on here') + (bridgeSt.auto ? '  \u221e' : clock))
+       : (master || !bridgeSt.running ? 'internet bridge' : 'use internet here');
   const card = document.getElementById('bcard');
   card.hidden = !on;
   if(!on) return;
@@ -1195,17 +1233,18 @@ function paintBridge(){
     ['google-chrome --proxy-server="http://' + addr + '" --user-data-dir=/tmp/chrome-airlock',
      'Chrome, sandboxed profile'],
     [ff, 'Firefox, throwaway profile'],
-    ['unset http_proxy https_proxy', 'hand the internet back']
+    ['unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY', 'hand the internet back (or re-run the first line once closed)']
   ];
   const tally =
       (bridgeSt.unrestricted ? '<b>any host</b> allowed'
                              : '<b>' + bridgeSt.allow.length + ' domains</b> allowed, everything else refused')
     + ' &middot; <b>' + bridgeSt.requests + '</b> through, <b>' + bridgeSt.blocked + '</b> blocked'
-    + ' &middot; ' + bytes(bridgeSt.bytes);
+    + ' &middot; ' + bytes(bridgeSt.bytes)
+    + (bridgeSt.master ? ' &middot; <b>' + bridgeSt.clients + '</b> machine(s) joined' : '');
 
   // Rebuild only when something actually changed. The clock ticks every second,
   // and re-writing innerHTML that often would cancel any text you were selecting.
-  const sig = [addr, cardOpen, bridgeSt.requests, bridgeSt.blocked, bridgeSt.bytes,
+  const sig = [addr, cardOpen, bridgeSt.clients, bridgeSt.requests, bridgeSt.blocked, bridgeSt.bytes,
                bridgeSt.unrestricted, (bridgeSt.allow||[]).length,
                bridgeSt.auto, bridgeSt.master].join('|');
   if(sig === cardSig) return;
@@ -1256,8 +1295,23 @@ async function toggleAuto(){
   }catch(e){ toast('failed'); }
 }
 
+async function toggleMine(){
+  const want = !bridgeSt.mine;
+  try{
+    const r = await fetch('/api/proxy', {method:'POST',
+      headers: Object.assign({'Content-Type':'application/json'}, H()),
+      body: JSON.stringify({me: want})});
+    bridgeSt = await r.json();
+    cardSig = '';
+    paintBridge();
+    toast(bridgeSt.mine ? 'internet on for this machine' : 'internet off for this machine');
+  }catch(e){ toast('failed'); }
+}
+
 async function toggleBridge(){
-  const want = !(bridgeSt && bridgeSt.running);
+  if(!bridgeSt) return;
+  if(!bridgeSt.master) return toggleMine();
+  const want = !bridgeSt.running;
   if(want && !confirm('Open the internet bridge?\n\nThe isolated machine will be able to reach the '
       + 'internet through this one. Make sure your lab allows that.')) return;
   try{
@@ -1653,8 +1707,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def is_master(self):
         """Is this request coming from the machine that runs the server?"""
-        ip = self.client_address[0]
-        return ip in ("127.0.0.1", "::1", "localhost") or ip in lan_ips()
+        return is_local_ip(self.client_address[0])
+
+    def proxy_status(self):
+        out = self.proxy.status()
+        out["master"] = self.is_master()
+        out["mine"] = self.proxy.running() and self.proxy.admits(self.client_address[0])
+        return out
 
     def gate(self):
         """True when the request may proceed; otherwise the reply is already sent."""
@@ -1740,9 +1799,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(200, {"version": self.store.wait(since)})
 
         if path == "/api/proxy":
-            out = self.proxy.status()
-            out["master"] = self.is_master()
-            return self.json(200, out)
+            return self.json(200, self.proxy_status())
 
         if path in ("/bridge.sh", "/api/bridge.sh"):
             # Meant to be eval'd on the isolated machine, which has no airlock
@@ -1750,12 +1807,20 @@ class Handler(BaseHTTPRequestHandler):
             #   eval "$(curl -s 'http://<host>:<port>/bridge.sh?t=<code>')"
             st = self.proxy.status()
             addr = "%s:%d" % (st["lan"], st["port"])
+            # Pasting the line is this machine's own opt-in.
+            if st["running"]:
+                self.proxy.join(self.client_address[0], True)
+            # A closed bridge still answers with a script that unsets the proxy:
+            # variables left pointing at a dead port would cut this shell off
+            # from its own network, so re-running the same line hands it back.
+            reset = ("unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY\n"
+                     "echo 'airlock: proxy variables cleared, back on your own network' >&2\n")
             if not st["enabled"]:
-                body = ("echo 'airlock: the internet bridge is not armed on the server.' >&2\n"
-                        "echo '        Restart it there with: airlock serve --enable-proxy' >&2\n")
+                body = reset + ("echo 'airlock: the internet bridge is not armed on the server.' >&2\n"
+                                "echo '        Restart it there with: airlock serve --enable-proxy' >&2\n")
             elif not st["running"]:
-                body = ("echo 'airlock: the internet bridge is closed.' >&2\n"
-                        "echo '        Open it from the page toggle, or: airlock bridge on' >&2\n")
+                body = reset + ("echo 'airlock: the internet bridge is closed.' >&2\n"
+                                "echo '        Open it from the page toggle, or: airlock bridge on' >&2\n")
             else:
                 left = st.get("expires_in") or 0
                 policy = ("any host" if st["unrestricted"]
@@ -1821,15 +1886,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.proxy.auto = bool(body["auto"])
                 msg = "auto-renew " + ("on" if self.proxy.auto else "off")
 
+            if "me" in body:
+                if body["me"] and not self.proxy.running():
+                    ok, msg = False, "the host has not opened the bridge"
+                else:
+                    self.proxy.join(self.client_address[0], bool(body["me"]))
+                    msg = "this machine " + ("joined" if body["me"] else "left")
+
             if "on" in body:
+                if not self.is_master():
+                    return self.json(403, {"error": "only the host machine can open or "
+                                                    "close the bridge"})
                 minutes = body.get("minutes")
                 if body["on"]:
                     ok, msg = self.proxy.start(int(minutes) if minutes else None)
                 else:
                     ok, msg = self.proxy.stop()
 
-            out = self.proxy.status()
-            out["master"] = self.is_master()
+            out = self.proxy_status()
             out["message"] = msg
             return self.json(200 if ok else 409, out)
 
@@ -1878,6 +1952,10 @@ def _quote(s):
 
 def _safe_name(name):
     return re.sub(r'[^\w.\- ]+', "_", os.path.basename(name or "file"))[:120] or "file"
+
+
+def is_local_ip(ip):
+    return ip in ("127.0.0.1", "::1", "localhost") or ip in lan_ips()
 
 
 def lan_ips():
